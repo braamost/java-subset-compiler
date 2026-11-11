@@ -1,17 +1,12 @@
 #include "automata.hpp"
 #include <stdexcept>
 
-Dfa build_dfa(const Nfa&, const std::vector<Rule>&) {
-    // TODO: Epsilon closure and subset construction; preserve rule priorities.
-    throw std::runtime_error("DFA construction is not implemented yet");
+Dfa DfaBuilder::build(const Nfa&, const std::vector<Rule>&) {
+    throw std::runtime_error("Part 3: DFA construction is not implemented yet");
 }
-
-Dfa minimize_dfa(const Dfa&) {
-    // TODO: Merge equivalent states while preserving accepting rule identities.
-    throw std::runtime_error("DFA minimization is not implemented yet");
+Dfa DfaBuilder::minimize(const Dfa&) {
+    throw std::runtime_error("Part 3: DFA minimization is not implemented yet");
 }
-
-void write_table(const Dfa&, std::ostream&) {
-    // TODO: Output start state, transitions, and accepting rule indices.
-    throw std::runtime_error("Transition table output is not implemented yet");
+void DfaBuilder::write_table(const Dfa&, std::ostream&) {
+    throw std::runtime_error("Part 3: transition table output is not implemented yet");
 }
