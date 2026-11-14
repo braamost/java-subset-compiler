@@ -1,24 +1,23 @@
 #include "rules.hpp"
+#include <algorithm>
 #include <cctype>
-#include <limits>
 #include <map>
-#include <set>
 #include <stdexcept>
 
 namespace {
 
+enum class ExpansionState { Unexpanded, Expanding, Expanded };
+
 struct Definition {
     std::string expression;
     std::size_t line;
+    ExpansionState state = ExpansionState::Unexpanded;
 };
 
-enum class EntryKind { Expression, Keyword, Punctuation };
-
 struct RuleEntry {
-    std::string name;
-    std::string expression;
+    Rule rule;
     std::size_t line;
-    EntryKind kind;
+    bool needs_expansion;
 };
 
 struct ParsedRuleFile {
@@ -43,11 +42,8 @@ bool is_name_character(char character) {
 }
 
 bool is_valid_name(const std::string& name) {
-    if (name.empty() || !is_name_start(name.front())) return false;
-    for (char character : name) {
-        if (!is_name_character(character)) return false;
-    }
-    return true;
+    return !name.empty() && is_name_start(name.front()) &&
+           std::all_of(name.begin() + 1, name.end(), is_name_character);
 }
 
 bool is_escaped_character(const std::string& text, std::size_t position) {
@@ -116,30 +112,27 @@ void parse_literal_group(const std::string& text, std::size_t line, ParsedRuleFi
         if (keywords && !is_valid_name(literal)) {
             report_rule_error(line, "invalid keyword '" + literal + "'");
         }
-        parsed.entries.push_back({literal, escape_literal_expression(literal), line,
-                                  keywords ? EntryKind::Keyword : EntryKind::Punctuation});
+        // Keywords win ties; equal priorities use the original vector order.
+        parsed.entries.push_back({{literal, escape_literal_expression(literal), keywords ? 0 : 1},
+                                  line, false});
     }
 }
 
 void parse_named_entry(const std::string& text, std::size_t line, ParsedRuleFile& parsed) {
-    std::size_t position = 0;
-    while (position < text.size() && is_name_character(text[position])) ++position;
-    std::string name = text.substr(0, position);
-    if (!is_valid_name(name)) report_rule_error(line, "invalid definition or token name");
-
-    while (position < text.size() && is_space(text[position])) ++position;
-    if (position == text.size() || (text[position] != '=' && text[position] != ':')) {
-        report_rule_error(line, "expected '=' or ':' after '" + name + "'");
+    std::size_t separator = text.find_first_of("=:");
+    if (separator == std::string::npos) {
+        report_rule_error(line, "expected '=' or ':' after a name");
     }
-    char separator = text[position++];
-    std::string expression = trim_whitespace(text.substr(position));
+    std::string name = trim_whitespace(text.substr(0, separator));
+    if (!is_valid_name(name)) report_rule_error(line, "invalid definition or token name");
+    std::string expression = trim_whitespace(text.substr(separator + 1));
     if (expression.empty()) report_rule_error(line, "missing expression for '" + name + "'");
 
-    if (separator == '=') {
+    if (text[separator] == '=') {
         auto inserted = parsed.definitions.emplace(name, Definition{expression, line});
         if (!inserted.second) report_rule_error(line, "duplicate definition '" + name + "'");
     } else {
-        parsed.entries.push_back({name, expression, line, EntryKind::Expression});
+        parsed.entries.push_back({{name, expression, 1}, line, true});
     }
 }
 
@@ -175,7 +168,7 @@ bool is_range_endpoint(const std::string& expression, std::size_t start, std::si
 
 class DefinitionExpander {
 public:
-    explicit DefinitionExpander(const std::map<std::string, Definition>& definitions)
+    explicit DefinitionExpander(std::map<std::string, Definition>& definitions)
         : definitions_(definitions) {}
 
     void validate_definitions() {
@@ -217,53 +210,20 @@ private:
                                 "' (write literal words as escaped or space-separated characters)");
     }
 
-    std::string expand_definition(const std::string& name, std::size_t reference_line) {
-        auto cached = expanded_definitions_.find(name);
-        if (cached != expanded_definitions_.end()) return cached->second;
-        if (!expanding_.insert(name).second) {
+    const std::string& expand_definition(const std::string& name, std::size_t reference_line) {
+        auto& definition = definitions_.at(name);
+        if (definition.state == ExpansionState::Expanded) return definition.expression;
+        if (definition.state == ExpansionState::Expanding) {
             report_rule_error(reference_line, "cyclic definition involving '" + name + "'");
         }
-        const auto& definition = definitions_.at(name);
-        std::string expanded = expand_expression(definition.expression, definition.line);
-        expanding_.erase(name);
-        expanded_definitions_.emplace(name, expanded);
-        return expanded;
+        definition.state = ExpansionState::Expanding;
+        definition.expression = expand_expression(definition.expression, definition.line);
+        definition.state = ExpansionState::Expanded;
+        return definition.expression;
     }
 
-    const std::map<std::string, Definition>& definitions_;
-    std::map<std::string, std::string> expanded_definitions_;
-    std::set<std::string> expanding_;
+    std::map<std::string, Definition>& definitions_;
 };
-
-std::vector<Rule> create_token_rules(const ParsedRuleFile& parsed, DefinitionExpander& expander) {
-    if (parsed.entries.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw std::runtime_error("too many token rules");
-    }
-    int keyword_count = 0;
-    for (const auto& entry : parsed.entries) {
-        if (entry.kind == EntryKind::Keyword) ++keyword_count;
-    }
-
-    int keyword_priority = 0;
-    int ordinary_priority = keyword_count;
-    std::vector<Rule> rules;
-    for (const auto& entry : parsed.entries) {
-        std::string expression = entry.expression;
-        if (entry.kind == EntryKind::Expression) {
-            expression = expander.expand_expression(expression, entry.line);
-        }
-
-        // Reserve the first priorities for keywords without reordering rules.
-        int priority;
-        if (entry.kind == EntryKind::Keyword) {
-            priority = keyword_priority++;
-        } else {
-            priority = ordinary_priority++;
-        }
-        rules.push_back({entry.name, expression, priority});
-    }
-    return rules;
-}
 
 } // namespace
 
@@ -271,5 +231,13 @@ std::vector<Rule> RuleReader::read(std::istream& input) {
     ParsedRuleFile parsed = parse_rule_file(input);
     DefinitionExpander expander(parsed.definitions);
     expander.validate_definitions();
-    return create_token_rules(parsed, expander);
+
+    std::vector<Rule> rules;
+    for (auto& entry : parsed.entries) {
+        if (entry.needs_expansion) {
+            entry.rule.expression = expander.expand_expression(entry.rule.expression, entry.line);
+        }
+        rules.push_back(entry.rule);
+    }
+    return rules;
 }
