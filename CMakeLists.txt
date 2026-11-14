@@ -16,3 +16,15 @@ add_executable(compiler
     src/lexer/emitter.cpp
     src/lexer/output.cpp
 )
+target_include_directories(compiler PRIVATE src/lexer src)
+
+add_executable(test_nfa
+    test_nfa.cpp
+    src/lexer/nfa.cpp
+    src/lexer/dfa.cpp
+    src/lexer/rules.cpp
+    src/lexer/dfa_adapter.cpp
+    src/lexer/emitter.cpp
+    src/lexer/output.cpp
+)
+target_include_directories(test_nfa PRIVATE src/lexer src)

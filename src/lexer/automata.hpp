@@ -48,3 +48,5 @@ public:
     Dfa minimize(const Dfa& dfa) override;
     void write_table(const Dfa& dfa, std::ostream& output) override;
 };
+
+void dump_nfa(const Nfa& nfa, std::ostream& out);
