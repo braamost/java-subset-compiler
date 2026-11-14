@@ -1,0 +1,32 @@
+\contentsline {section}{\numberline {1}Project Overview}{3}{section.1}%
+\contentsline {section}{\numberline {2}Project Structure}{3}{section.2}%
+\contentsline {section}{\numberline {3}Description of the Used Data Structures}{4}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Rule}{4}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}NFA structures}{4}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Regex AST (internal to the NFA builder)}{4}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}DFA structures}{4}{subsection.3.4}%
+\contentsline {subsection}{\numberline {3.5}Containers used by the algorithms}{5}{subsection.3.5}%
+\contentsline {subsection}{\numberline {3.6}Scanner}{5}{subsection.3.6}%
+\contentsline {section}{\numberline {4}Explanation of All Algorithms and Techniques Used}{5}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Rule-file parsing and definition expansion}{5}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Regular-expression parsing (recursive descent)}{6}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Thompson construction (regex $\rightarrow $ NFA)}{6}{subsection.4.3}%
+\contentsline {subsection}{\numberline {4.4}Subset construction (NFA $\rightarrow $ DFA)}{6}{subsection.4.4}%
+\contentsline {subsection}{\numberline {4.5}Accepting-rule conflict resolution}{7}{subsection.4.5}%
+\contentsline {subsection}{\numberline {4.6}DFA minimization (partition refinement / Moore's algorithm)}{7}{subsection.4.6}%
+\contentsline {subsection}{\numberline {4.7}Maximal-munch (longest-match) scanning}{7}{subsection.4.7}%
+\contentsline {subsection}{\numberline {4.8}Error handling (panic mode)}{8}{subsection.4.8}%
+\contentsline {subsection}{\numberline {4.9}Overall driver}{8}{subsection.4.9}%
+\contentsline {section}{\numberline {5}Resultant Transition Table for the Minimal DFA}{8}{section.5}%
+\contentsline {subsection}{\numberline {5.1}How it was produced}{8}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Summary of the minimal DFA}{8}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Table format and rule numbering}{8}{subsection.5.3}%
+\contentsline {subsection}{\numberline {5.4}The exact generated table}{9}{subsection.5.4}%
+\contentsline {section}{\numberline {6}Resultant Token Stream for the Example Test Program}{12}{section.6}%
+\contentsline {section}{\numberline {7}Assumptions Made and Their Justification}{13}{section.7}%
+\contentsline {section}{\numberline {8}Testing and Verification}{14}{section.8}%
+\contentsline {section}{\numberline {9}Bonus Task: Flex/Lex-Based Generator}{14}{section.9}%
+\contentsline {subsection}{\numberline {9.1}Required steps}{14}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}The Flex specification used}{14}{subsection.9.2}%
+\contentsline {subsection}{\numberline {9.3}Comparison with the hand-written lexer}{15}{subsection.9.3}%
+\contentsline {section}{\numberline {10}Conclusion}{15}{section.10}%

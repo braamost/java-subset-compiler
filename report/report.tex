@@ -1,0 +1,671 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{pdflscape}
+\geometry{margin=1in}
+
+\title{Java Subset Lexical Analyzer\\\large Design and Implementation Report}
+\author{\textbf{Participants:}\n
+Braa Mostafa (22010636)\n
+Mohamed Sabry (22011129)\n
+Muhnad Sayed (22011902)\n
+Youssef Khamis (22011381)}
+\date{\today}
+
+\begin{document}
+\maketitle
+\newpage
+
+\section{Project Overview}
+This project implements a complete, table-driven lexical analyzer for a subset of
+Java, written in C++17. The program reads a \emph{rule file} that describes the
+token classes of the language with regular expressions, regular definitions,
+keyword groups, and punctuation groups, and from this description it
+automatically constructs a minimal deterministic finite automaton (DFA). The
+resulting DFA is then used to scan Java-subset source programs and emit the
+stream of recognized token classes.
+
+The implemented system follows the classic scanner-generator pipeline described
+in the Dragon Book:
+\begin{enumerate}
+    \item \textbf{Rule parsing} -- read and validate the lexical rules, expand
+          named regular definitions, and assign priorities (keywords first).
+    \item \textbf{Regex parsing} -- convert each regular expression into an
+          abstract syntax tree (AST) with a recursive-descent parser.
+    \item \textbf{NFA construction} -- translate each AST into an NFA fragment
+          using Thompson's construction and combine all fragments with a common
+          start state.
+    \item \textbf{Subset construction} -- determinize the combined NFA into a
+          DFA, resolving accepting-rule conflicts by priority.
+    \item \textbf{DFA minimization} -- merge equivalent states with partition
+          refinement (Moore's algorithm) to obtain the minimal DFA.
+    \item \textbf{Scanning} -- run the maximal-munch (longest-match) algorithm
+          over the input and emit one token class per recognized lexeme.
+\end{enumerate}
+
+For the assignment's Phase~1 rule file, the pipeline produces concrete,
+verifiable numbers: the $18$ token rules are compiled into a Thompson NFA with
+$153$ states, subset construction yields a DFA with $54$ states, and
+minimization reduces it to the \textbf{minimal DFA with 44 states} over an
+alphabet of $77$ input characters. The transition table of this minimal DFA is
+written to the output file required by the assignment, and the token stream
+produced for the example test program matches the expected output exactly.
+
+\section{Project Structure}
+The lexer lives under \texttt{src/lexer/} and is split into small, independently
+testable components:
+\begin{itemize}
+    \item \texttt{rules.hpp} / \texttt{rules.cpp}: the \texttt{Rule} structure and
+          the \texttt{RuleReader} that parses the rule file, expands named
+          definitions, and assigns priorities.
+    \item \texttt{automata.hpp}: the shared automata data structures
+          (\texttt{NfaState}, \texttt{Nfa}, \texttt{DfaState}, \texttt{Dfa}) and the
+          builder interfaces.
+    \item \texttt{nfa.cpp}: regular-expression tokenizer, recursive-descent regex
+          parser, and Thompson NFA construction (\texttt{NfaBuilder}).
+    \item \texttt{dfa.cpp}: epsilon-closure computation, subset construction,
+          partition-refinement minimization, and transition-table printing
+          (\texttt{DfaBuilder}).
+    \item \texttt{scanner.hpp} / \texttt{scanner.cpp}: the \texttt{Scanner} class
+          implementing maximal-munch scanning, the identifier symbol table, and
+          panic-mode error recovery.
+    \item \texttt{lexer.hpp} / \texttt{lexer.cpp}: the \texttt{LexerDefinition}
+          facade that builds the rules and the minimized DFA once per process and
+          hands out a fresh \texttt{Scanner} per source stream.
+    \item \texttt{main.cpp}: the command-line driver
+          (\texttt{lexer RULES\_FILE TABLE\_FILE SOURCE\_FILE...}).
+    \item \texttt{test\_files/}: the Phase~1 rule file, the example test program,
+          and its expected token stream.
+    \item \texttt{tests/}: unit and end-to-end tests (\texttt{test\_nfa},
+          \texttt{test\_dfa}, \texttt{test\_scanner}, \texttt{test\_e2e},
+          \texttt{test\_flex\_parity}).
+    \item \texttt{bonus\_flex/lexer.l}: the Flex specification for the bonus task,
+          kept behaviorally identical to the hand-written lexer.
+\end{itemize}
+
+\section{Description of the Used Data Structures}
+
+\subsection{Rule}
+\begin{lstlisting}[basicstyle=\ttfamily\small,language=C++]
+struct Rule {
+    std::string name;        // token class, e.g. "id", "while"
+    std::string expression;  // fully expanded regular expression
+    int priority;            // smaller wins; rule index breaks ties
+};
+\end{lstlisting}
+A \texttt{Rule} carries the token-class name, the regular expression \emph{after}
+all named definitions have been expanded, and an integer priority. The rule
+reader reserves the lowest (strongest) priorities for keywords, so reserved
+words such as \texttt{int} and \texttt{while} always beat the generic
+\texttt{id} pattern. Rule vector indices stay stable through every later stage;
+the DFA stores these indices in its accepting states.
+
+\subsection{NFA structures}
+\begin{lstlisting}[basicstyle=\ttfamily\small,language=C++]
+struct NfaState {
+    std::map<char, std::vector<int>> transitions; // labeled edges
+    std::vector<int> epsilon;                     // epsilon edges
+    int rule = -1;                                // accepting rule or -1
+};
+struct Nfa { std::vector<NfaState> states; int start = 0; };
+\end{lstlisting}
+States are identified by their index in the \texttt{states} vector, so an edge is
+just an \texttt{int}. Each state keeps a character-indexed map of possible target
+lists (a state may move to several states on the same character --
+nondeterminism) plus a separate list of $\varepsilon$-moves. The one accepting
+state of each Thompson fragment stores the index of the rule it accepts.
+
+\subsection{Regex AST (internal to the NFA builder)}
+The regex compiler first tokenizes an expression into \texttt{Token} records
+(literal, escaped literal, \texttt{\textbackslash L} for $\varepsilon$, parentheses,
+\texttt{|}, \texttt{*}, \texttt{+}, and the range dash), then builds a tree of
+\texttt{AstNode} objects with kinds \texttt{Literal}, \texttt{Epsilon},
+\texttt{Range}, \texttt{Concat}, \texttt{Alt}, \texttt{Star}, and \texttt{Plus}.
+Nodes own their children through \texttt{std::unique\_ptr}, so the tree frees
+itself. A small \texttt{Fragment \{int start; int accept;\}} pair is used while
+translating the AST into NFA states.
+
+\subsection{DFA structures}
+\begin{lstlisting}[basicstyle=\ttfamily\small,language=C++]
+struct DfaState {
+    std::map<char, int> transitions; // missing edge = failure
+    int rule = -1;                   // winning rule or -1
+};
+struct Dfa { std::vector<DfaState> states; int start = 0; };
+\end{lstlisting}
+A DFA state has at most one target per character, so the map value is a single
+\texttt{int}. A character absent from the map means the automaton dies on that
+input -- the dead state is represented implicitly rather than materialized
+(printed as `\texttt{-}' in the transition table). The \texttt{rule} field holds
+the highest-priority rule among the NFA accepting states merged into this DFA
+state.
+
+\subsection{Containers used by the algorithms}
+\begin{itemize}
+    \item \texttt{std::set<int>}: subsets of NFA states ($\varepsilon$-closures).
+          Sets are ordered and canonical, so equal subsets compare equal.
+    \item \texttt{std::map<std::set<int>, int>}: maps each discovered NFA-state
+          subset to its DFA state id during subset construction, guaranteeing
+          each subset becomes exactly one DFA state.
+    \item \texttt{std::queue<...>}: the worklist for the breadth-first
+          $\varepsilon$-closure computation and for subset construction.
+    \item \texttt{std::vector<std::set<int>>} and
+          \texttt{std::map<std::map<char,int>, std::set<int>>}: the partitions and
+          the signature-based splitting map used by the minimizer.
+    \item \texttt{std::map<std::string, Definition>} plus memoization maps inside
+          the rule reader for named-definition expansion and cycle detection.
+\end{itemize}
+
+\subsection{Scanner}
+\begin{lstlisting}[basicstyle=\ttfamily\small,language=C++]
+struct ScannedToken {
+    std::string type;    // token class name
+    std::string lexeme;  // matched text
+    int symbol;          // identifier's symbol-table index, or -1
+    std::size_t offset;  // zero-based byte offset in the input
+};
+\end{lstlisting}
+The \texttt{Scanner} walks the DFA over an \texttt{std::istream}. It keeps:
+\begin{itemize}
+    \item a \texttt{std::deque<char> pending\_} push-back buffer: characters read
+          past the last accepting state are ``unread'' into this deque so the
+          next token starts exactly after the previous lexeme (required by
+          maximal munch);
+    \item a \texttt{std::vector<std::string> symbols\_} acting as a simple symbol
+          table -- every distinct identifier lexeme is interned once and its
+          index is attached to the token;
+    \item a \texttt{std::vector<std::size\_t> error\_offsets\_} recording the byte
+          offset of every lexical error for diagnostics.
+\end{itemize}
+Finally, \texttt{LexerDefinition} bundles the rule vector and the minimized DFA
+so they are built once and reused for any number of source files.
+
+\section{Explanation of All Algorithms and Techniques Used}
+
+\subsection{Rule-file parsing and definition expansion}
+The rule file is read line by line. Four line forms are supported, following the
+handout:
+\begin{itemize}
+    \item \texttt{name = expr} -- a \emph{regular definition} (e.g.
+          \texttt{letter = a-z | A-Z}); it does not create a token by itself.
+    \item \texttt{name : expr} -- a \emph{token rule} (e.g.
+          \texttt{id: letter (letter|digit)*}).
+    \item \texttt{\{w1 w2 ...\}} -- a \emph{keyword group}; every word becomes a
+          reserved-word token whose pattern is the word itself.
+    \item \texttt{[p1 p2 ...]} -- a \emph{punctuation group}; every
+          (possibly escaped) symbol becomes a one-character token.
+\end{itemize}
+Group members are turned into safe regular expressions by escaping every regex
+metacharacter (\texttt{escape\_literal\_expression}). Identifier-like words of
+two or more characters inside an expression are treated as references to named
+definitions and are expanded \emph{recursively with memoization}; the expansion
+is wrapped in parentheses to preserve operator precedence. Range endpoints such
+as \texttt{a} in \texttt{a-z} are deliberately \emph{not} expanded even if a
+definition with the same single-letter name exists. The expander detects
+\textbf{undefined references}, \textbf{duplicate definitions}, and
+\textbf{cyclic definitions} and reports them as errors with the offending line
+number. Priorities are then assigned: the $k$ keywords receive priorities
+$0..k-1$ and all other rules continue from $k$, in file order, so reserved words
+always dominate.
+
+\subsection{Regular-expression parsing (recursive descent)}
+Each expanded expression is tokenized (whitespace between symbols is ignored;
+\texttt{\textbackslash x} yields the literal \texttt{x}; \texttt{\textbackslash L}
+yields $\varepsilon$) and parsed with a standard precedence-layered
+recursive-descent grammar:
+\[
+\textit{alt} \rightarrow \textit{concat}\ (\texttt{|}\ \textit{concat})^* \qquad
+\textit{concat} \rightarrow \textit{postfix}^+ \qquad
+\textit{postfix} \rightarrow \textit{atom}\ (\texttt{*}\,|\,\texttt{+})^* \qquad
+\textit{atom} \rightarrow \texttt{(}\textit{alt}\texttt{)}\ |\ \text{literal}\ |\ \text{range}\ |\ \varepsilon
+\]
+This gives the conventional precedence (closure $>$ concatenation $>$ union).
+Character ranges \texttt{lo-hi} are recognized at the atom level and validated
+(\texttt{lo} $\le$ \texttt{hi}). Malformed inputs -- unmatched parentheses,
+dangling \texttt{*}/\texttt{+}, empty alternatives, trailing backslashes --
+raise descriptive errors naming the offending rule.
+
+\subsection{Thompson construction (regex $\rightarrow$ NFA)}
+The AST is translated bottom-up into NFA fragments with the textbook Thompson
+rules: a literal creates two states joined by one labeled edge; a range
+\texttt{lo-hi} creates one edge per character in the range; concatenation links
+fragment~$A$'s accept to fragment~$B$'s start with an $\varepsilon$-edge;
+union, star, and plus add new start/accept states wired with
+$\varepsilon$-edges in the usual way (\texttt{+} is like \texttt{*} but without
+the ``skip'' edge, so at least one iteration is required). Every rule's fragment
+accept state is tagged with the rule index, and finally a single new
+\textbf{global start state} is created with $\varepsilon$-edges to every
+fragment start, producing one combined NFA that matches any token.
+
+As a safety check, after building each fragment the builder runs a BFS over
+$\varepsilon$-edges (\texttt{can\_reach\_eps}) from the fragment start to its
+accept state; if the accept state is $\varepsilon$-reachable the expression can
+match the empty string, which would make the scanner loop forever, so such rules
+are rejected at construction time.
+
+\subsection{Subset construction (NFA $\rightarrow$ DFA)}
+Determinization uses the standard worklist algorithm:
+\begin{enumerate}
+    \item The DFA start state is $\varepsilon\text{-closure}(\{s_0\})$, computed by a
+          BFS over $\varepsilon$-edges with a \texttt{std::queue}.
+    \item For each subset $T$ popped from the worklist and each character $c$
+          that actually labels an edge out of $T$ (the local alphabet, not all
+          256 bytes), compute
+          $\varepsilon\text{-closure}(\mathit{move}(T, c))$.
+    \item If the resulting subset is new, register it in
+          \texttt{std::map<std::set<int>,int>} and push it on the worklist; in
+          all cases record the DFA transition.
+    \item The \emph{empty} subset is never materialized: a transition into it is
+          simply omitted, which implicitly encodes the dead state.
+\end{enumerate}
+For Phase~1 this turns the 153-state NFA into a 54-state DFA.
+
+\subsection{Accepting-rule conflict resolution}
+A DFA state may contain several accepting NFA states (e.g.\ after reading
+\texttt{int} the subset contains both the \texttt{int}-keyword accept and an
+\texttt{id} accept). While each subset is processed, the builder scans its NFA
+states and keeps the rule with the \textbf{smallest priority}; if two rules have
+equal priority the smaller original rule index wins, making the result fully
+deterministic. Because keywords received the smallest priorities during rule
+parsing, this resolves the classic keyword-vs-identifier ambiguity in favor of
+the reserved words -- inside the automaton itself, with no special cases in the
+scanner.
+
+\subsection{DFA minimization (partition refinement / Moore's algorithm)}
+Minimization starts from the initial partition that groups states \emph{by their
+accepting rule id} (one block per token class plus one block for
+non-accepting states). Grouping by rule rather than by a mere
+accepting/non-accepting flag is essential: merging an \texttt{int}-accepting
+state with a \texttt{while}-accepting state would be language-preserving for the
+union automaton but would destroy the token classification. The algorithm then
+repeats:
+\begin{enumerate}
+    \item map every state to the index of its current block;
+    \item compute for every state a \emph{signature}
+          $c \mapsto \text{block}(\delta(s,c))$ over the global alphabet, with a
+          missing transition encoded as block $-1$;
+    \item split each block by signature equality
+          (\texttt{std::map<std::map<char,int>, std::set<int>>});
+\end{enumerate}
+until no block splits. Each final block becomes one state of the minimal DFA;
+transitions are remapped through a representative, the block containing the old
+start state becomes the new start, and the accepting rule id of the block is
+preserved. For Phase~1 this reduces 54 states to the minimal \textbf{44 states}.
+
+\subsection{Maximal-munch (longest-match) scanning}
+\texttt{Scanner::nextToken()} implements the classical two-pointer maximal-munch
+algorithm:
+\begin{enumerate}
+    \item skip whitespace (space, tab, CR, LF, form feed, vertical tab), counting
+          offsets; return \texttt{std::nullopt} on end of input;
+    \item walk the DFA from the start state, appending every examined character
+          to a buffer; each time an accepting state is entered, remember the rule
+          and the current length (\emph{last-accept bookkeeping});
+    \item stop at the first missing transition or at end of input, then
+          \emph{unread} every character after the last accepted length back into
+          the \texttt{pending\_} deque so it will be rescanned as the start of
+          the next token;
+    \item emit the token: its class name, its lexeme, its byte offset, and -- for
+          \texttt{id} tokens -- its index in the interned symbol table.
+\end{enumerate}
+This guarantees, for example, that \texttt{!=10} is split into \texttt{relop}
+(\texttt{!=}) followed by \texttt{num} (\texttt{10}), and that
+\texttt{passX} is a single identifier rather than the keyword-prefix
+\texttt{pass} plus garbage.
+
+\subsection{Error handling (panic mode)}
+If the walk fails before any accepting state was reached, the scanner records
+the current byte offset in \texttt{error\_offsets\_}, \textbf{discards exactly one
+byte} (guaranteeing progress and termination), pushes the rest of the examined
+characters back, and resumes scanning. The driver prints every error offset to
+\texttt{stderr} after the token stream, so a single bad character never aborts
+the whole scan. The constructor additionally validates the DFA defensively: it
+rejects an automaton whose start state accepts (empty token), out-of-range
+transition targets, and invalid rule ids.
+
+\subsection{Overall driver}
+\texttt{LexerDefinition} runs
+\texttt{RuleReader} $\rightarrow$ \texttt{NfaBuilder} $\rightarrow$
+\texttt{DfaBuilder::build} $\rightarrow$ \texttt{DfaBuilder::minimize} once, and
+\texttt{main} then writes the transition table to the requested file and scans
+each source file given on the command line, printing one token class per line.
+
+\section{Resultant Transition Table for the Minimal DFA}
+
+\subsection{How it was produced}
+Built and run from the repository root:
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+cmake -S . -B build && cmake --build build
+./build/lexer src/lexer/test_files/phase1.rules build/phase1.table \
+    src/lexer/test_files/phase1_program.java > build/phase1.tokens
+less -s build/phase1.table
+\end{lstlisting}
+
+\subsection{Summary of the minimal DFA}
+For the Phase~1 rules the pipeline produces:
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Token rules & 18 \\
+Thompson NFA states & 153 \\
+DFA states after subset construction & 54 \\
+\textbf{States in the minimal DFA} & \textbf{44} \\
+Alphabet size (characters with transitions) & 77 \\
+Start state & 3 (marked \texttt{->} in the table) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Table format and rule numbering}
+Rows are DFA states ($0$--$43$); columns are the input characters; a cell holds
+the target state or `\texttt{-}' for a missing edge (implicit dead state). The
+last column, \texttt{Rule}, is the id of the accepted token rule, or
+\texttt{None} for non-accepting states. Rule ids map to token classes as
+follows (priority in parentheses; keywords hold the strongest priorities):
+\begin{center}
+\small
+\begin{tabular}{lll@{\hspace{2em}}lll}
+\toprule
+Id & Token & Priority & Id & Token & Priority \\
+\midrule
+0 & \texttt{id}      & 6 & 9  & \texttt{while}  & 5 \\
+1 & \texttt{boolean} & 0 & 10 & \texttt{;}      & 10 \\
+2 & \texttt{int}     & 1 & 11 & \texttt{,}      & 11 \\
+3 & \texttt{float}   & 2 & 12 & \texttt{(}      & 12 \\
+4 & \texttt{num}     & 7 & 13 & \texttt{)}      & 13 \\
+5 & \texttt{relop}   & 8 & 14 & \texttt{\{}     & 14 \\
+6 & \texttt{assign}  & 9 & 15 & \texttt{\}}     & 15 \\
+7 & \texttt{if}      & 3 & 16 & \texttt{addop}  & 16 \\
+8 & \texttt{else}    & 4 & 17 & \texttt{mulop}  & 17 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The table itself illustrates the techniques described above. For instance,
+state~3 is the start state; reading \texttt{i} leads to state~11, then
+\texttt{n} to state~14, then \texttt{t} to state~22, which accepts rule~2
+(\texttt{int}) -- yet any further letter or digit moves to state~4, the generic
+identifier state accepting rule~0 (\texttt{id}). That is exactly the
+keyword-versus-identifier resolution and the longest-match behavior encoded in
+the automaton. Likewise state~0 (reached from state~3 on \texttt{!}) only has an
+edge on \texttt{=}, so a lone \texttt{!} is a lexical error while \texttt{!=}
+accepts \texttt{relop}.
+
+\subsection{The exact generated table}
+The following is the verbatim content of the generated table file
+(as displayed by \texttt{less -s build/phase1.table}). To improve readability,
+we present it in landscape format and with a compact monospaced style:
+
+\begin{landscape}
+\small
+\begin{verbatim}
+State    !   (   )   *   +   ,   -   .   /   0   1   2   3   4   5   6   7   8   9   ;   <   =   >   A   B   C   D   E   F   G   H   I   J   K   L   M   N   O   P   Q   R   S   T   U   V   W   X   Y   Z   a   b   c   d   e   f   g   h   i   j   k   l   m   n   o   p   q   r   s   t   u   v   w   x   y   z   {   }   Rule
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+0        -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  30   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  None
+1        -   -   -   -   -   -   -   -   -  27  27  27  27  27  27  27  27  27  27   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  None
+2        -   -   -   -   -   -   -   -   -  28  28  28  28  28  28  28  28  28  28   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  None
+->3       0  38  39  43  42  37  42  -  43  29  29  29  29  29  29  29  29  29  29  36  31  32  31   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   5   4   4  11   7   4   4  21   4   4   4   4   4   4   4   4   4   4   4   4   4   9   4   4   4  40  41  None
+4        -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+5        -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   6   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+6        -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   8   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+7        -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  10   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+8        -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  13   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+9        -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  12   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+10       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  16   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+11       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  14   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+12       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  15   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+13       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  17   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+14       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  22   4   4   4   4   4   4   4   -   -   0
+15       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  23   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+16       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  19   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+17       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  20   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+18       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  25   4   4   4   4   4   4   4   -   -   0
+19       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  26   4   4   4   4   4   4   4   -   -   0
+20       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  24   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+21       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  33   4   4   4   4   4   4   4  18   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+22       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+23       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4  35   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   0
+24       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   1
+25       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   2
+26       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   3
+27       -   -   -   -   -   -   -   -   -  27  27  27  27  27  27  27  27  27  27   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   4
+28       -   -   -   -   -   -   -   -   -  28  28  28  28  28  28  28  28  28  28   -   -   -   -   -   -   -   -   1   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   4
+29       -   -   -   -   -   -   -   2   -  29  29  29  29  29  29  29  29  29  29   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   4
+30       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  5
+31       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  30   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  5
+32       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  30   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  6
+33       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   7
+34       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   8
+35       -   -   -   -   -   -   -   -   -   4   4   4   4   4   4   4   4   4   4   -   -   -   -   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   -   -   9
+36       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  10
+37       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  11
+38       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  12
+39       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  13
+40       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  14
+41       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  15
+42       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  16
+43       -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -  17
+\end{verbatim}
+\end{landscape}
+
+\section{Resultant Token Stream for the Example Test Program}
+The example test program
+(\texttt{src/lexer/test\_files/phase1\_program.java}) is:
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+int sum , count , pass , mnt; while (pass !=10)
+{
+pass = pass + 1 ;
+}
+\end{lstlisting}
+
+Running the lexer on it produces the following stream of token classes, one per
+line (verbatim program output):
+
+\lstinputlisting[basicstyle=\ttfamily\small]{example_tokens.txt}
+
+Reading the stream against the source text, each lexeme classifies as:
+\begin{center}
+\small
+\begin{tabular}{ll@{\hspace{3em}}ll}
+\toprule
+Lexeme & Token & Lexeme & Token \\
+\midrule
+\texttt{int}   & \texttt{int} (keyword) & \texttt{!=}   & \texttt{relop} \\
+\texttt{sum}   & \texttt{id}            & \texttt{10}   & \texttt{num} \\
+\texttt{,}     & \texttt{,}             & \texttt{)}    & \texttt{)} \\
+\texttt{count} & \texttt{id}            & \texttt{\{}   & \texttt{\{} \\
+\texttt{pass}  & \texttt{id}            & \texttt{pass} & \texttt{id} \\
+\texttt{mnt}   & \texttt{id}            & \texttt{=}    & \texttt{assign} \\
+\texttt{;}     & \texttt{;}             & \texttt{+}    & \texttt{addop} \\
+\texttt{while} & \texttt{while} (keyword) & \texttt{1}  & \texttt{num} \\
+\texttt{(}     & \texttt{(}             & \texttt{;} \texttt{\}} & \texttt{;} \texttt{\}} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Note the interesting cases: \texttt{while} and \texttt{int} are reported as
+reserved words, not identifiers (priority resolution inside the DFA);
+\texttt{!=10} is correctly split into \texttt{relop} and \texttt{num}
+(longest match); and \texttt{pass} stays an \texttt{id} even though it shares a
+prefix path with no keyword. The output is byte-identical to the expected file
+(\texttt{diff -u src/lexer/test\_files/phase1\_expected.tokens build/phase1.tokens}
+reports no differences). The printed stream contains only the token
+\emph{class} names, as the assignment requires; internally every
+\texttt{ScannedToken} also carries the lexeme, its byte offset, and (for
+identifiers) its symbol-table index, which the parser phase can consume.
+
+\section{Assumptions Made and Their Justification}
+\begin{enumerate}
+    \item \textbf{Keywords are reserved and beat identifiers.} Keyword rules get
+          priorities $0..k-1$ before all other rules, and the DFA builder picks
+          the smallest priority when a state accepts several rules.
+          \emph{Justification:} the assignment requires \texttt{if},
+          \texttt{while}, \texttt{int}, etc.\ to be recognized as reserved words;
+          resolving this once in the automaton is cleaner and faster than
+          post-filtering identifier lexemes in the scanner.
+    \item \textbf{Ties between equal priorities go to the earlier rule in the
+          file.} \emph{Justification:} this mirrors the ``first rule wins''
+          convention of Lex/Flex and makes the lexer's behavior deterministic
+          and predictable from the rule file alone.
+    \item \textbf{Missing DFA transitions represent the dead state.} No explicit
+          error state is stored; the table prints `\texttt{-}'.
+          \emph{Justification:} the dead state and all edges into/out of it carry
+          no information; omitting it keeps the table sparse and readable and is
+          a standard compact automaton representation. The minimizer treats a
+          missing edge as target block $-1$, so correctness is preserved.
+    \item \textbf{The scanner uses maximal munch (longest match).}
+          \emph{Justification:} this is the universal lexical convention; without
+          it, \texttt{<=} would wrongly split into \texttt{<} and \texttt{=},
+          and \texttt{10} into \texttt{1} and \texttt{0}. The push-back deque
+          makes the required backtracking exact and cheap.
+    \item \textbf{No token may match the empty string; \texttt{\textbackslash L}
+          is only valid as an alternative inside a longer pattern} (e.g.\ the
+          optional exponent in \texttt{num}). The NFA builder rejects
+          empty-matching rules and the scanner refuses a DFA whose start state
+          accepts. \emph{Justification:} an empty match would let the scanner
+          emit infinitely many tokens without consuming input.
+    \item \textbf{Whitespace (space, tab, CR, LF, form feed, vertical tab)
+          separates tokens and is otherwise ignored; inside expressions in the
+          rule file, unescaped whitespace is formatting only.}
+          \emph{Justification:} this matches both the behavior expected from the
+          example program and the handout's rule-file notation, where
+          \texttt{digit+ . digits} denotes concatenation of three units.
+    \item \textbf{Lexical errors are recovered in panic mode by discarding one
+          byte and continuing; offsets are reported on \texttt{stderr}.}
+          \emph{Justification:} a scanner should find \emph{all} lexical errors in
+          one pass rather than stopping at the first; discarding exactly one
+          character guarantees progress, and the remaining input is rescanned so
+          no valid token after the error is lost.
+    \item \textbf{Single-character words in rule expressions are literals unless
+          they name a definition, and range endpoints are always literal; bare
+          words of two or more characters must name a definition.}
+          \emph{Justification:} this resolves the ambiguity of the handout
+          notation (\texttt{a-z} must mean the character range even though
+          \texttt{a} could be a name) while still catching typos --
+          an undefined multi-letter word is an error with a line number, with
+          escaped or space-separated characters and keyword groups available for
+          writing literal words.
+    \item \textbf{Input is treated as single-byte characters (ASCII).}
+          \emph{Justification:} the Java subset in the handout only uses ASCII
+          letters, digits, and operators; bytes are read unsigned so any other
+          byte simply triggers the normal error recovery.
+    \item \textbf{Identifiers are interned into a simple symbol table (a vector
+          of distinct lexemes) during scanning.} \emph{Justification:} later
+          compiler phases need symbol identity, not just the string; building it
+          in the scanner costs almost nothing and keeps token objects small.
+\end{enumerate}
+
+\section{Testing and Verification}
+The implementation is covered by unit and end-to-end tests under
+\texttt{src/lexer/tests/}, all of which pass:
+\begin{itemize}
+    \item \texttt{test\_nfa}: regex parsing and Thompson construction, including
+          error cases (unmatched parentheses, dangling operators, empty
+          alternatives, empty-matching rules, invalid ranges).
+    \item \texttt{test\_dfa}: $\varepsilon$-closure, subset construction,
+          priority resolution, minimization correctness, and table output.
+    \item \texttt{test\_scanner}: longest match, push-back, symbol table, error
+          offsets, and DFA validation.
+    \item \texttt{test\_e2e}: the full pipeline on the Phase~1 rules and test
+          program, compared against the expected token stream.
+    \item \texttt{test\_flex\_parity}: the Flex-generated scanner (bonus) produces
+          the same token stream and error count as the hand-written one.
+\end{itemize}
+
+\section{Bonus Task: Flex/Lex-Based Generator}
+The bonus task asks how a lexical analyzer can be generated automatically with
+Lex/Flex from the same set of regular expressions. Flex accepts a
+pattern--action specification and generates the whole DFA-based scanner,
+automating exactly the pipeline implemented by hand in this project.
+
+\subsection{Required steps}
+\begin{enumerate}
+    \item Express every token class (keywords, identifiers, numbers, operators,
+          punctuation) as a Flex regular expression, reusing named definitions
+          (\texttt{letter}, \texttt{digit}, \texttt{digits}) that mirror the rule
+          file.
+    \item Place the patterns in \texttt{bonus\_flex/lexer.l}, listing keyword
+          patterns \emph{before} the identifier pattern -- Flex breaks
+          equal-length matches by rule order, which reproduces our keyword
+          priority scheme.
+    \item Attach an action to each pattern that prints the token-class name
+          (or the lexeme itself for keywords and punctuation, matching the
+          expected output format).
+    \item Add a whitespace rule with an empty action and a catch-all \texttt{.}
+          rule that counts lexical errors, mirroring the hand-written scanner's
+          panic mode.
+    \item Run \texttt{flex} on the specification and compile the generated
+          \texttt{lex.yy.c} together with a small driver.
+    \item Run the generated scanner on the example program and compare the token
+          stream with the hand-written lexer (automated by
+          \texttt{test\_flex\_parity}).
+\end{enumerate}
+
+\subsection{The Flex specification used}
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+%option noyywrap
+
+%{
+#include <stdio.h>
+int flex_error_count = 0;
+%}
+
+letter      [a-zA-Z]
+digit       [0-9]
+digits      {digit}+
+
+%%
+"boolean"|"int"|"float"|"if"|"else"|"while"     { fprintf(yyout, "%s\n", yytext); }
+{letter}({letter}|{digit})*                     { fprintf(yyout, "id\n"); }
+{digit}+|{digit}+\.{digits}(E{digits})?         { fprintf(yyout, "num\n"); }
+"=="|"!="|">"|">="|"<"|"<="                     { fprintf(yyout, "relop\n"); }
+"="                                             { fprintf(yyout, "assign\n"); }
+"+"|"-"                                         { fprintf(yyout, "addop\n"); }
+"*"|"/"                                         { fprintf(yyout, "mulop\n"); }
+";"|","|"("|")"|"{"|"}"                         { fprintf(yyout, "%s\n", yytext); }
+[ \t\r\n\f\v]+                                  { /* skip whitespace */ }
+.                                               { ++flex_error_count; }
+%%
+\end{lstlisting}
+
+Build and run:
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+flex bonus_flex/lexer.l
+cc -o flex_scanner lex.yy.c bonus_flex/flex_main.c
+./flex_scanner src/lexer/test_files/phase1_program.java
+\end{lstlisting}
+
+\subsection{Comparison with the hand-written lexer}
+Both scanners implement the same theory -- regular expressions compiled to a
+minimal DFA driven with maximal munch -- and produce identical output on the
+test program. The differences are practical: Flex writes the automaton for us
+(less effort, fewer bugs, easy to extend with new tokens), generates highly
+optimized table-compressed C code, and encodes priority by rule order; the
+hand-written version, on the other hand, accepts the assignment's own rule-file
+notation at \emph{run time} (no recompilation when rules change), exposes the
+intermediate NFA/DFA so the transition table can be printed, and gives full
+control over error reporting and the token API. Writing the lexer by hand is
+what makes the generated automaton inspectable and explainable, which is the
+point of this assignment, while the Flex version demonstrates how the same
+specification is handled by an industrial generator.
+
+\section{Conclusion}
+The project delivers a complete, tested scanner generator and scanner for the
+Java subset: rules are parsed and validated with precise error messages,
+compiled through Thompson's construction and subset construction into a DFA,
+minimized to 44 states with partition refinement, and driven by a
+maximal-munch scanner with panic-mode recovery, a symbol table, and byte-exact
+error offsets. The generated transition table and the token stream for the
+example program both match the assignment's expected results, and the bonus
+Flex implementation reproduces the same behavior automatically, confirming the
+correctness of the hand-written pipeline.
+
+\end{document}
