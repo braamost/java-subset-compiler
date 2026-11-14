@@ -55,3 +55,27 @@ add_executable(test_dfa
     src/lexer/rules.cpp
 )
 target_include_directories(test_dfa PRIVATE src/lexer src ${PROJECT_SOURCE_DIR})
+target_include_directories(test_nfa PRIVATE src/lexer src)
+enable_language(C)
+find_package(FLEX REQUIRED)
+
+FLEX_TARGET(BonusLexer
+    ${CMAKE_CURRENT_SOURCE_DIR}/bonus_flex/lexer.l
+    ${CMAKE_CURRENT_BINARY_DIR}/lex.yy.c
+)
+
+add_executable(flex_scanner
+    ${FLEX_BonusLexer_OUTPUTS}
+    bonus_flex/flex_main.c
+)
+
+add_executable(test_flex_parity
+    src/lexer/tests/test_flex_parity.cpp
+    ${FLEX_BonusLexer_OUTPUTS}
+    src/lexer/lexer.cpp
+    src/lexer/rules.cpp
+    src/lexer/nfa.cpp
+    src/lexer/dfa.cpp
+    src/lexer/scanner.cpp
+)
+target_include_directories(test_flex_parity PRIVATE src/lexer src ${PROJECT_SOURCE_DIR})
