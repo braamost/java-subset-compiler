@@ -15,15 +15,43 @@ add_executable(compiler
 target_include_directories(compiler PRIVATE src/lexer src)
 
 add_executable(test_nfa
-    test_nfa.cpp
+    src/lexer/tests/test_nfa.cpp
     src/lexer/nfa.cpp
     src/lexer/dfa.cpp
     src/lexer/rules.cpp
 )
-target_include_directories(test_nfa PRIVATE src/lexer src)
+target_include_directories(test_nfa PRIVATE src/lexer src ${PROJECT_SOURCE_DIR})
 
 add_executable(test_scanner
-    test_scanner.cpp
+    src/lexer/tests/test_scanner.cpp
     src/lexer/scanner.cpp
 )
-target_include_directories(test_scanner PRIVATE src/lexer)
+target_include_directories(test_scanner PRIVATE src/lexer ${PROJECT_SOURCE_DIR})
+
+add_executable(test_e2e
+    src/lexer/tests/test_e2e.cpp
+    src/lexer/lexer.cpp
+    src/lexer/rules.cpp
+    src/lexer/nfa.cpp
+    src/lexer/dfa.cpp
+    src/lexer/scanner.cpp
+)
+target_include_directories(test_e2e PRIVATE src/lexer src ${PROJECT_SOURCE_DIR})
+
+add_executable(lexer
+    src/lexer/main.cpp
+    src/lexer/lexer.cpp
+    src/lexer/rules.cpp
+    src/lexer/nfa.cpp
+    src/lexer/dfa.cpp
+    src/lexer/scanner.cpp
+)
+target_include_directories(lexer PRIVATE src/lexer)
+
+add_executable(test_dfa
+    src/lexer/tests/test_dfa.cpp
+    src/lexer/nfa.cpp
+    src/lexer/dfa.cpp
+    src/lexer/rules.cpp
+)
+target_include_directories(test_dfa PRIVATE src/lexer src ${PROJECT_SOURCE_DIR})

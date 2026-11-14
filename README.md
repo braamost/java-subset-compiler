@@ -1,41 +1,32 @@
-# Java Subset Compiler
+# Build and run the Phase 1 lexer
 
-A C++17 university project for the Programming Languages and Compiler course at
-Alexandria University. The project develops a compiler for a subset of Java across
-three phases, leading to JVM bytecode generation.
+Requirements: CMake 3.16 or newer and a C++17 compiler.
 
-## Phase 1: Lexical Analyzer Generator
-
-The first phase reads lexical rules, constructs an NFA, converts it to a DFA,
-minimizes the DFA, and outputs its transition table and a lexical analyzer.
-The scanner will recognize the longest matching token, resolve rule priorities,
-store identifiers in a symbol table, and recover from invalid input.
-
-The repository currently contains starter structures and function declarations.
-The algorithms are not implemented yet.
-
-## Build and run
-
-Requires CMake 3.16 or newer and a C++17 compiler.
+From the repository root:
 
 ```sh
 cmake -S . -B build
 cmake --build build
-./build/compiler
 ```
 
-The executable currently prints a starter message.
+Run the lexer with the supplied assignment rules and test program:
 
-## Structure
-
-```text
-src/
-  main.cpp           Program entry point
-  lexer/             Phase 1 rules, automata, and scanner
-  parser/            Reserved for a later phase
-  codegen/           Reserved for a later phase
-docs/
-  phase1-work.md     Phase 1 division of work
+```sh
+./build/lexer src/lexer/test_files/phase1.rules build/phase1.table \
+  src/lexer/test_files/phase1_program.java > build/phase1.tokens
 ```
 
-See the [Phase 1 work division](docs/phase1-work.md) for the four-student plan.
+Compare the output with the expected token classes:
+
+```sh
+diff -u src/lexer/test_files/phase1_expected.tokens build/phase1.tokens
+```
+
+No diff means the token classes match. The transition table is written to
+`build/phase1.table`. Lexical errors are reported to standard error with their
+zero-based byte offsets.
+
+The lexer builds the rules and minimized DFA once per process. Pass more than one
+source file after the table path to reuse that definition for those files. Parser
+code can instead construct a `LexerDefinition` once and request a `Scanner` for
+each source stream; call `Scanner::nextToken()` until it returns `std::nullopt`.
