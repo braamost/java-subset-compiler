@@ -77,6 +77,9 @@ Dfa DfaBuilder::build(const Nfa& nfa, const std::vector<Rule>& rules) {
             }
 
             std::set<int> next_dfa_subset = compute_epsilon_closure(nfa, move_result);
+            // The empty subset has no path to an accepting state. Represent it
+            // as a missing transition instead of adding a dead sink state.
+            if (next_dfa_subset.empty()) continue;
             if (dfa_state_map.find(next_dfa_subset) == dfa_state_map.end()) {
                 int new_id = dfa.states.size();
                 dfa_state_map[next_dfa_subset] = new_id; 
