@@ -13,7 +13,6 @@ struct Rule {
 // Keep vector indices stable through all stages. Preserve escaped literals and
 // \L; support the handout's ranges/operators. Keywords must be reserved: resolve
 // their priority against id here, not in the scanner. Do not emit empty tokens.
-// Use priority 0 for keywords and 1 for other rules; ties follow vector order.
 // Definitions may refer forward. Bare identifier-like words of two or more
 // characters are definition references; unknown words are errors. Single
 // characters are literals unless they name a definition; range endpoints stay
